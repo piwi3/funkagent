@@ -44,27 +44,27 @@ class Agent:
             return {}
         return {func.__name__: func for func in functions}
 
-    def _create_chat_completion(
+    async def _create_chat_completion(
         self, messages: list, use_functions: bool=True
     ) -> openai.ChatCompletion:
         if use_functions and self.functions:
-            res = openai.ChatCompletion.create(
+            res = await openai.ChatCompletion.acreate(
                 deployment_id=self.deployment_name,
                 messages=messages,
                 functions=self.functions,
                 function_call="auto"
             )
         else:
-            res = openai.ChatCompletion.create(
+            res = await openai.ChatCompletion.acreate(
                 deployment_id=self.deployment_name,
                 messages=messages
             )
         return res
 
-    def _generate_response(self) -> openai.ChatCompletion:
+    async def _generate_response(self) -> openai.ChatCompletion:
         while True:
             print('.', end='')
-            res = self._create_chat_completion(
+            res = await self._create_chat_completion(
                 self.chat_history + self.internal_thoughts
             )
             finish_reason = res.choices[0].finish_reason
@@ -72,7 +72,7 @@ class Agent:
             if finish_reason == 'stop' or len(self.internal_thoughts) > 3:
                 # create the final answer
                 final_thought = self._final_thought_answer()
-                final_res = self._create_chat_completion(
+                final_res = await self._create_chat_completion(
                     self.chat_history + self.internal_thoughts + [final_thought],
                     use_functions=False
                 )
@@ -125,9 +125,9 @@ class Agent:
         # }
         # return self.final_thought
 
-    def ask(self, query: str) -> openai.ChatCompletion:
+    async def ask(self, query: str) -> openai.ChatCompletion:
         self.internal_thoughts = []
         self.chat_history.append({'role': 'user', 'content': query})
-        res = self._generate_response()
+        res = await self._generate_response()
         self.chat_history.append(res.choices[0].message.to_dict())
         return res.choices[0].message.content
