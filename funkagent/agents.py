@@ -2,6 +2,7 @@ import json
 from typing import Optional
 from funkagent import parser
 import os
+import inspect
 
 import openai
 
@@ -78,7 +79,11 @@ class Agent:
                 )
                 return final_res
             elif finish_reason == 'function_call':
-                self._handle_function_call(res)
+                func_name = res.choices[0].message.function_call.name
+                if inspect.iscoroutinefunction(self.func_mapping[func_name]):
+                    await self._ahandle_function_call(res)
+                else:
+                    self._handle_function_call(res)
             else:
                 raise ValueError(f"Unexpected finish reason: {finish_reason}")
 
@@ -97,6 +102,25 @@ class Agent:
             args = json.loads(args_str)
             func = self.func_mapping[func_name]
             res = func(**args)
+        except Exception as e:
+            res = f"Exception: {e}"
+        return res
+
+    async def _ahandle_function_call(self, res: openai.ChatCompletion):
+        res_func_call = res.choices[0].message.to_dict()
+        res_func_call['content'] = None # content key is required
+        self.internal_thoughts.append(res_func_call)
+        func_name = res.choices[0].message.function_call.name
+        args_str = res.choices[0].message.function_call.arguments
+        result = await self._acall_function(func_name, args_str)
+        res_msg = {'role': 'function', 'name': func_name, 'content': str(result)}
+        self.internal_thoughts.append(res_msg)
+    
+    async def _acall_function(self, func_name: str, args_str: str):
+        try:
+            args = json.loads(args_str)
+            func = self.func_mapping[func_name]
+            res = await func(**args)
         except Exception as e:
             res = f"Exception: {e}"
         return res
