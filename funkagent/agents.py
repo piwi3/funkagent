@@ -1,6 +1,7 @@
 import json
 from typing import Optional
 from funkagent import parser
+import os
 
 import openai
 
@@ -17,12 +18,18 @@ Overall, Assistant is a powerful system that can help with a wide range of tasks
 class Agent:
     def __init__(
         self,
-        openai_api_key: str,
-        model_name: str = 'gpt-3.5-turbo-0613',
+        openai_api_key: Optional[str] = os.environ.get('AZURE_OPENAI_API_KEY'),
+        openai_api_base: Optional[str] = os.environ.get('AZURE_OPENAI_BASE'),
+        openai_api_version: Optional[str] = os.environ.get('AZURE_OPENAI_API_VERSION'),
+        deployment_name: Optional[str] = os.environ.get('AZURE_OPENAI_CHAT_DEPLOYMENT'),
         functions: Optional[list] = None
     ):
+        openai.api_type = "azure"
         openai.api_key = openai_api_key
-        self.model_name = model_name
+        openai.api_base = openai_api_base
+        openai.api_version = openai_api_version        
+
+        self.deployment_name = deployment_name
         self.functions = self._parse_functions(functions)
         self.func_mapping = self._create_func_mapping(functions)
         self.chat_history = [{'role': 'system', 'content': sys_msg}]
@@ -42,13 +49,14 @@ class Agent:
     ) -> openai.ChatCompletion:
         if use_functions and self.functions:
             res = openai.ChatCompletion.create(
-                model=self.model_name,
+                deployment_id=self.deployment_name,
                 messages=messages,
-                functions=self.functions
+                functions=self.functions,
+                function_call="auto"
             )
         else:
             res = openai.ChatCompletion.create(
-                model=self.model_name,
+                deployment_id=self.deployment_name,
                 messages=messages
             )
         return res
@@ -75,11 +83,13 @@ class Agent:
                 raise ValueError(f"Unexpected finish reason: {finish_reason}")
 
     def _handle_function_call(self, res: openai.ChatCompletion):
-        self.internal_thoughts.append(res.choices[0].message.to_dict())
+        res_func_call = res.choices[0].message.to_dict()
+        res_func_call['content'] = None # content key is required
+        self.internal_thoughts.append(res_func_call)
         func_name = res.choices[0].message.function_call.name
         args_str = res.choices[0].message.function_call.arguments
         result = self._call_function(func_name, args_str)
-        res_msg = {'role': 'function', 'name': func_name,'content': str(result)}
+        res_msg = {'role': 'function', 'name': func_name, 'content': str(result)}
         self.internal_thoughts.append(res_msg)
 
     def _call_function(self, func_name: str, args_str: str):
