@@ -18,7 +18,7 @@ class Agent:
     def __init__(
         self,
         openai_api_key: str,
-        model_name: str = 'gpt-4-0613',
+        model_name: str = 'gpt-3.5-turbo-0613',
         functions: Optional[list] = None
     ):
         openai.api_key = openai_api_key
@@ -65,7 +65,7 @@ class Agent:
                 # create the final answer
                 final_thought = self._final_thought_answer()
                 final_res = self._create_chat_completion(
-                    self.chat_history + [final_thought],
+                    self.chat_history + self.internal_thoughts + [final_thought],
                     use_functions=False
                 )
                 return final_res
@@ -79,36 +79,45 @@ class Agent:
         func_name = res.choices[0].message.function_call.name
         args_str = res.choices[0].message.function_call.arguments
         result = self._call_function(func_name, args_str)
-        res_msg = {'role': 'assistant', 'content': (f"The answer is {result}.")}
+        res_msg = {'role': 'function', 'name': func_name,'content': str(result)}
         self.internal_thoughts.append(res_msg)
 
     def _call_function(self, func_name: str, args_str: str):
-        args = json.loads(args_str)
-        func = self.func_mapping[func_name]
-        res = func(**args)
+        try:
+            args = json.loads(args_str)
+            func = self.func_mapping[func_name]
+            res = func(**args)
+        except Exception as e:
+            res = f"Exception: {e}"
         return res
     
     def _final_thought_answer(self):
-        thoughts = ("To answer the question I will use these step by step instructions."
-                    "\n\n")
-        for thought in self.internal_thoughts:
-            if 'function_call' in thought.keys():
-                thoughts += (f"I will use the {thought['function_call']['name']} "
-                             "function to calculate the answer with arguments "
-                             + thought['function_call']['arguments'] + ".\n\n")
-            else:
-                thoughts += thought["content"] + "\n\n"
-        self.final_thought = {
-            'role': 'assistant',
-            'content': (f"{thoughts} Based on the above, I will now answer the "
-                        "question, this message will only be seen by me so answer with "
-                        "the assumption with that the user has not seen this message.")
+
+        return {
+            "role" : "assistant", 
+            "content": "The user has only seen the last user input. Consider this, when providing your response."
         }
-        return self.final_thought
+    
+        # thoughts = ("To answer the question I will use these step by step instructions."
+        #             "\n\n")
+        # for thought in self.internal_thoughts:
+        #     if 'function_call' in thought.keys():
+        #         thoughts += (f"I will use the {thought['function_call']['name']} "
+        #                      "function to calculate the answer with arguments "
+        #                      + thought['function_call']['arguments'] + ".\n\n")
+        #     else:
+        #         thoughts += thought["content"] + "\n\n"
+        # self.final_thought = {
+        #     'role': 'assistant',
+        #     'content': (f"{thoughts} Based on the above, I will now answer the "
+        #                 "question, this message will only be seen by me so answer with "
+        #                 "the assumption with that the user has not seen this message.")
+        # }
+        # return self.final_thought
 
     def ask(self, query: str) -> openai.ChatCompletion:
         self.internal_thoughts = []
         self.chat_history.append({'role': 'user', 'content': query})
         res = self._generate_response()
         self.chat_history.append(res.choices[0].message.to_dict())
-        return res
+        return res.choices[0].message.content
