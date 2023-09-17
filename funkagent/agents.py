@@ -6,9 +6,9 @@ import inspect
 import openai
 import logging
 
-from history.cosmosdbservice import CosmosConversationClient
-
 from azure.identity import DefaultAzureCredential
+
+from history.cosmosdbservice import CosmosConversationClient
 
 
 sys_msg = """Assistant is a large language model trained by OpenAI.
@@ -20,9 +20,18 @@ Assistant is constantly learning and improving, and its capabilities are constan
 Overall, Assistant is a powerful system that can help with a wide range of tasks and provide valuable insights and information on a wide range of topics. Whether you need help with a specific question or just want to have a conversation about a particular topic, Assistant is here to assist.
 """
 
+class aobject(object):
+    """ Inheriting this class allows to define async __init__"""
+    async def __new__(cls, *args, **kwargs):
+        instance = super().__new__(cls)
+        await instance.__init__(*args, **kwargs)
+        return instance
+    
+    async def __init__(self):
+        pass
 
-class Agent:
-    def __init__(
+class Agent(aobject):
+    async def __init__(
         self,
         user_id: str = None,
         openai_api_key: Optional[str] = os.environ.get('AZURE_OPENAI_API_KEY'),
@@ -58,29 +67,33 @@ class Agent:
 
         # Initialize CosmosDB client
         self.cosmos_conversation_client = self.get_cosmos_conversation_client()
+        self.conversation_id = conversation_id
+        await self.initialize_chat_history()
 
+    async def initialize_chat_history(self): 
         # Get or create conversation in / from CosmosDB
-        if conversation_id is not None:
-            conversation_dict = self.cosmos_conversation_client.get_conversation(self.user_id, conversation_id)
-            self.conversation_id = conversation_dict.get['id'] if conversation_dict else None
-        if conversation_id is None:
-            conversation_dict = self.cosmos_conversation_client.create_conversation(self.user_id)
+        if self.conversation_id is not None:
+            conversation_dict = await self.cosmos_conversation_client.get_conversation(self.user_id, self.conversation_id)
+            self.conversation_id = conversation_dict['id'] if conversation_dict else None
+        if self.conversation_id is None:
+            conversation_dict = await self.cosmos_conversation_client.create_conversation(self.user_id)
             self.conversation_id = conversation_dict['id']
-
+       
         # Get chat history from CosmosDB
+        messages = await self.cosmos_conversation_client.get_messages(self.user_id, self.conversation_id)
         self.chat_history = [
             {
                 "role": message["role"],
                 "content": message["content"]
             } 
-            for message in self.cosmos_conversation_client.get_messages(self.user_id, self.conversation_id)
+            for message in messages
         ]
 
         # Add system message if chat history is empty
         if self.chat_history == []:
             message = {'role': 'system', 'content': sys_msg}
             self.chat_history.append(message)
-            self.cosmos_conversation_client.create_message(
+            await self.cosmos_conversation_client.create_message(
                     conversation_id=self.conversation_id,
                     user_id=self.user_id,
                     input_message=message
@@ -208,7 +221,7 @@ class Agent:
 
         message_user = {'role': 'user', 'content': query}
         self.chat_history.append(message_user)
-        self.cosmos_conversation_client.create_message(
+        await self.cosmos_conversation_client.create_message(
             conversation_id=self.conversation_id,
             user_id=self.user_id,
             input_message=message_user
@@ -219,7 +232,7 @@ class Agent:
 
         message_assistant = res.choices[0].message.to_dict()
         self.chat_history.append(message_assistant)
-        self.cosmos_conversation_client.create_message(
+        await self.cosmos_conversation_client.create_message(
             conversation_id=self.conversation_id,
             user_id=self.user_id,
             input_message=message_assistant
@@ -227,25 +240,25 @@ class Agent:
 
         return res.choices[0].message.content
     
-    def get_conversations(self):
-        return self.cosmos_conversation_client.get_conversations(self.user_id)
+    async def get_conversations(self):
+        return await self.cosmos_conversation_client.get_conversations(self.user_id)
     
-    def delete_conversation(self, conversation_id: Optional[str]=None):
+    async def delete_conversation(self, conversation_id: Optional[str]=None):
         conversation_id = self.conversation_id if conversation_id is None else conversation_id
         if conversation_id != self.conversation_id:
             # Delete conversation with given id
-            return self.cosmos_conversation_client.delete_conversation(self.user_id, conversation_id)
+            return await self.cosmos_conversation_client.delete_conversation(self.user_id, conversation_id)
         else:
             # Delete current conversation and chat history
             self.chat_history = []
-            res = self.cosmos_conversation_client.delete_conversation(self.user_id, conversation_id)
+            res = await self.cosmos_conversation_client.delete_conversation(self.user_id, conversation_id)
 
             # Create new conversation
-            conversation_dict = self.cosmos_conversation_client.create_conversation(self.user_id)
+            conversation_dict = await self.cosmos_conversation_client.create_conversation(self.user_id)
             self.conversation_id = conversation_dict['id']
             message = {'role': 'system', 'content': sys_msg}
             self.chat_history.append(message)
-            self.cosmos_conversation_client.create_message(
+            await self.cosmos_conversation_client.create_message(
                     conversation_id=self.conversation_id,
                     user_id=self.user_id,
                     input_message=message
