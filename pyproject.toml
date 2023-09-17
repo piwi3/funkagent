@@ -11,6 +11,9 @@ openai = "^0.27.8"
 ipykernel = "^6.25.2"
 python-dotenv = "^1.0.0"
 langchain = "^0.0.291"
+flask = "^2.3.3"
+azure-identity = "^1.14.0"
+azure-cosmos = "^4.5.1"
 
 [tool.poetry.group.test.dependencies]
 pytest = "^7.4.0"

@@ -3,8 +3,13 @@ from typing import Optional
 from funkagent import parser
 import os
 import inspect
-
 import openai
+import logging
+
+from history.cosmosdbservice import CosmosConversationClient
+
+from azure.identity import DefaultAzureCredential
+
 
 sys_msg = """Assistant is a large language model trained by OpenAI.
 
@@ -19,21 +24,88 @@ Overall, Assistant is a powerful system that can help with a wide range of tasks
 class Agent:
     def __init__(
         self,
+        user_id: str = None,
         openai_api_key: Optional[str] = os.environ.get('AZURE_OPENAI_API_KEY'),
         openai_api_base: Optional[str] = os.environ.get('AZURE_OPENAI_BASE'),
         openai_api_version: Optional[str] = os.environ.get('AZURE_OPENAI_API_VERSION'),
         deployment_name: Optional[str] = os.environ.get('AZURE_OPENAI_CHAT_DEPLOYMENT'),
-        functions: Optional[list] = None
+        functions: Optional[list] = None,
+        conversation_id: Optional[int] = None,
     ):
+        # Check user_id
+        if user_id is None:
+            raise ValueError("user_id is required")
+        elif not isinstance(user_id, str):
+            raise TypeError("user_id must be a string")
+        self.user_id = user_id
+
+        # OpenAI Integration Settings
         openai.api_type = "azure"
         openai.api_key = openai_api_key
         openai.api_base = openai_api_base
-        openai.api_version = openai_api_version        
+        openai.api_version = openai_api_version  
+        self.deployment_name = deployment_name      
 
-        self.deployment_name = deployment_name
+        # Settings for OpenAI Function Calls
         self.functions = self._parse_functions(functions)
         self.func_mapping = self._create_func_mapping(functions)
-        self.chat_history = [{'role': 'system', 'content': sys_msg}]
+        
+        # CosmosDB Integration Settings
+        self.AZURE_COSMOSDB_DATABASE = os.environ.get("AZURE_COSMOSDB_DATABASE")
+        self.AZURE_COSMOSDB_ACCOUNT = os.environ.get("AZURE_COSMOSDB_ACCOUNT")
+        self.AZURE_COSMOSDB_CONVERSATIONS_CONTAINER = os.environ.get("AZURE_COSMOSDB_CONVERSATIONS_CONTAINER")
+        self.AZURE_COSMOSDB_ACCOUNT_KEY = os.environ.get("AZURE_COSMOSDB_ACCOUNT_KEY")
+
+        # Initialize CosmosDB client
+        self.cosmos_conversation_client = self.get_cosmos_conversation_client()
+
+        # Get or create conversation in / from CosmosDB
+        if conversation_id is not None:
+            conversation_dict = self.cosmos_conversation_client.get_conversation(self.user_id, conversation_id)
+            self.conversation_id = conversation_dict.get['id'] if conversation_dict else None
+        if conversation_id is None:
+            conversation_dict = self.cosmos_conversation_client.create_conversation(self.user_id)
+            self.conversation_id = conversation_dict['id']
+
+        # Get chat history from CosmosDB
+        self.chat_history = [
+            {
+                "role": message["role"],
+                "content": message["content"]
+            } 
+            for message in self.cosmos_conversation_client.get_messages(self.user_id, self.conversation_id)
+        ]
+
+        # Add system message if chat history is empty
+        if self.chat_history == []:
+            message = {'role': 'system', 'content': sys_msg}
+            self.chat_history.append(message)
+            self.cosmos_conversation_client.create_message(
+                    conversation_id=self.conversation_id,
+                    user_id=self.user_id,
+                    input_message=message
+                )
+
+    def get_cosmos_conversation_client(self) -> CosmosConversationClient:
+        # Initialize a CosmosDB client with AAD auth and containers
+        if self.AZURE_COSMOSDB_DATABASE and self.AZURE_COSMOSDB_ACCOUNT and self.AZURE_COSMOSDB_CONVERSATIONS_CONTAINER:
+            try :
+                cosmos_endpoint = f'https://{self.AZURE_COSMOSDB_ACCOUNT}.documents.azure.com:443/'
+
+                if not self.AZURE_COSMOSDB_ACCOUNT_KEY:
+                    credential = DefaultAzureCredential()
+                else:
+                    credential = self.AZURE_COSMOSDB_ACCOUNT_KEY
+
+                return CosmosConversationClient(
+                    cosmosdb_endpoint=cosmos_endpoint, 
+                    credential=credential, 
+                    database_name=self.AZURE_COSMOSDB_DATABASE,
+                    container_name=self.AZURE_COSMOSDB_CONVERSATIONS_CONTAINER
+                )
+            except Exception as e:
+                logging.exception("Exception in CosmosDB initialization", e)
+                return None
 
     def _parse_functions(self, functions: Optional[list]) -> Optional[list]:
         if functions is None:
@@ -132,26 +204,52 @@ class Agent:
             "content": "The user has only seen the last user input. Consider this, when providing your response."
         }
     
-        # thoughts = ("To answer the question I will use these step by step instructions."
-        #             "\n\n")
-        # for thought in self.internal_thoughts:
-        #     if 'function_call' in thought.keys():
-        #         thoughts += (f"I will use the {thought['function_call']['name']} "
-        #                      "function to calculate the answer with arguments "
-        #                      + thought['function_call']['arguments'] + ".\n\n")
-        #     else:
-        #         thoughts += thought["content"] + "\n\n"
-        # self.final_thought = {
-        #     'role': 'assistant',
-        #     'content': (f"{thoughts} Based on the above, I will now answer the "
-        #                 "question, this message will only be seen by me so answer with "
-        #                 "the assumption with that the user has not seen this message.")
-        # }
-        # return self.final_thought
-
     async def ask(self, query: str) -> openai.ChatCompletion:
+
+        message_user = {'role': 'user', 'content': query}
+        self.chat_history.append(message_user)
+        self.cosmos_conversation_client.create_message(
+            conversation_id=self.conversation_id,
+            user_id=self.user_id,
+            input_message=message_user
+        )
+
         self.internal_thoughts = []
-        self.chat_history.append({'role': 'user', 'content': query})
         res = await self._generate_response()
-        self.chat_history.append(res.choices[0].message.to_dict())
+
+        message_assistant = res.choices[0].message.to_dict()
+        self.chat_history.append(message_assistant)
+        self.cosmos_conversation_client.create_message(
+            conversation_id=self.conversation_id,
+            user_id=self.user_id,
+            input_message=message_assistant
+        )
+
         return res.choices[0].message.content
+    
+    def get_conversations(self):
+        return self.cosmos_conversation_client.get_conversations(self.user_id)
+    
+    def delete_conversation(self, conversation_id: Optional[str]=None):
+        conversation_id = self.conversation_id if conversation_id is None else conversation_id
+        if conversation_id != self.conversation_id:
+            # Delete conversation with given id
+            return self.cosmos_conversation_client.delete_conversation(self.user_id, conversation_id)
+        else:
+            # Delete current conversation and chat history
+            self.chat_history = []
+            res = self.cosmos_conversation_client.delete_conversation(self.user_id, conversation_id)
+
+            # Create new conversation
+            conversation_dict = self.cosmos_conversation_client.create_conversation(self.user_id)
+            self.conversation_id = conversation_dict['id']
+            message = {'role': 'system', 'content': sys_msg}
+            self.chat_history.append(message)
+            self.cosmos_conversation_client.create_message(
+                    conversation_id=self.conversation_id,
+                    user_id=self.user_id,
+                    input_message=message
+                )
+            
+            # Return result of deletion
+            return res
